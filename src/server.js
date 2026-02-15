@@ -1,6 +1,6 @@
 /**
  * Express Server - Anthropic-compatible API
- * Proxies to Google Cloud Code via Antigravity
+ * Proxies to Google Cloud Code via Antigravity or Chutes.ai
  * Supports multi-account load balancing
  */
 
@@ -9,6 +9,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas, getSubscriptionTier, isValidModel } from './cloudcode/index.js';
+import { sendMessage as chutesSendMessage, sendMessageStream as chutesSendMessageStream, listModels as chutesListModels } from './chutes/index.js';
 import { mountWebUI } from './webui/index.js';
 import { config } from './config.js';
 
@@ -25,6 +26,43 @@ import usageStats from './modules/usage-stats.js';
 // Parse fallback flag directly from command line args to avoid circular dependency
 const args = process.argv.slice(2);
 const FALLBACK_ENABLED = args.includes('--fallback') || process.env.FALLBACK === 'true';
+
+// Parse --provider flag (format: --provider=chutes or --provider chutes)
+let PROVIDER_OVERRIDE = null;
+for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith('--provider=')) {
+        PROVIDER_OVERRIDE = args[i].split('=')[1];
+    } else if (args[i] === '--provider' && args[i + 1]) {
+        PROVIDER_OVERRIDE = args[i + 1];
+    }
+}
+
+// Determine active provider
+const ACTIVE_PROVIDER = PROVIDER_OVERRIDE || process.env.PROVIDER || config.provider || 'cloudcode';
+
+/**
+ * Check if the current provider is Chutes
+ * @returns {boolean}
+ */
+function isChutesProvider() {
+    return ACTIVE_PROVIDER === 'chutes';
+}
+
+/**
+ * Get Chutes API key from config or environment
+ * @returns {string} API key
+ */
+function getChutesApiKey() {
+    return config.chutes?.apiKey || process.env.CHUTES_API_KEY || '';
+}
+
+/**
+ * Get Chutes API base URL from config or environment
+ * @returns {string} Base URL
+ */
+function getChutesBaseUrl() {
+    return config.chutes?.baseUrl || process.env.CHUTES_BASE_URL || 'https://llm.chutes.ai';
+}
 
 // Parse --strategy flag (format: --strategy=sticky or --strategy sticky)
 let STRATEGY_OVERRIDE = null;
@@ -641,6 +679,12 @@ app.post('/refresh-token', async (req, res) => {
  */
 app.get('/v1/models', async (req, res) => {
     try {
+        // Chutes provider: use Chutes API directly
+        if (isChutesProvider()) {
+            const models = await chutesListModels(getChutesApiKey(), getChutesBaseUrl());
+            return res.json(models);
+        }
+
         await ensureInitialized();
         const { account } = accountManager.selectAccount();
         if (!account) {
@@ -692,9 +736,6 @@ app.post('/v1/messages/count_tokens', (req, res) => {
  */
 app.post('/v1/messages', async (req, res) => {
     try {
-        // Ensure account manager is initialized
-        await ensureInitialized();
-
         const {
             model,
             messages,
@@ -719,25 +760,6 @@ app.post('/v1/messages', async (req, res) => {
         }
 
         const modelId = requestedModel;
-
-        // Validate model ID before processing
-        const { account: validationAccount } = accountManager.selectAccount();
-        if (validationAccount) {
-            const token = await accountManager.getTokenForAccount(validationAccount);
-            const projectId = validationAccount.subscription?.projectId || null;
-            const valid = await isValidModel(modelId, token, projectId);
-
-            if (!valid) {
-                throw new Error(`invalid_request_error: Invalid model: ${modelId}. Use /v1/models to see available models.`);
-            }
-        }
-
-        // Optimistic Retry: If ALL accounts are rate-limited for this model, reset them to force a fresh check.
-        // If we have some available accounts, we try them first.
-        if (accountManager.isAllRateLimited(modelId)) {
-            logger.warn(`[Server] All accounts rate-limited for ${modelId}. Resetting state for optimistic retry.`);
-            accountManager.resetAllRateLimits();
-        }
 
         // Validate required fields
         if (!messages || !Array.isArray(messages)) {
@@ -770,7 +792,7 @@ app.post('/v1/messages', async (req, res) => {
             temperature
         };
 
-        logger.info(`[API] Request for model: ${request.model}, stream: ${!!stream}`);
+        logger.info(`[API] Request for model: ${request.model}, stream: ${!!stream}, provider: ${ACTIVE_PROVIDER}`);
 
         // Debug: Log message structure to diagnose tool_use/tool_result ordering
         if (logger.isDebugEnabled) {
@@ -781,6 +803,91 @@ app.post('/v1/messages', async (req, res) => {
                     : (typeof msg.content === 'string' ? 'text' : 'unknown');
                 logger.debug(`  [${i}] ${msg.role}: ${contentTypes}`);
             });
+        }
+
+        // Route to Chutes provider
+        if (isChutesProvider()) {
+            const chutesApiKey = getChutesApiKey();
+            const chutesBaseUrl = getChutesBaseUrl();
+
+            if (!chutesApiKey) {
+                return res.status(401).json({
+                    type: 'error',
+                    error: {
+                        type: 'authentication_error',
+                        message: 'Chutes API key not configured. Set CHUTES_API_KEY environment variable or configure in config.json.'
+                    }
+                });
+            }
+
+            if (stream) {
+                try {
+                    const generator = chutesSendMessageStream(request, chutesApiKey, chutesBaseUrl);
+                    const firstResult = await generator.next();
+
+                    res.status(200);
+                    res.setHeader('Content-Type', 'text/event-stream');
+                    res.setHeader('Cache-Control', 'no-cache');
+                    res.setHeader('Connection', 'keep-alive');
+                    res.setHeader('X-Accel-Buffering', 'no');
+                    res.flushHeaders();
+
+                    if (!firstResult.done) {
+                        res.write(`event: ${firstResult.value.type}\ndata: ${JSON.stringify(firstResult.value)}\n\n`);
+                        if (res.flush) res.flush();
+                    }
+
+                    for await (const event of generator) {
+                        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+                        if (res.flush) res.flush();
+                    }
+
+                    res.end();
+                } catch (error) {
+                    if (!res.headersSent) {
+                        logger.error('[API] Chutes stream error:', error);
+                        const { errorType, statusCode, errorMessage } = parseError(error);
+                        return res.status(statusCode).json({
+                            type: 'error',
+                            error: { type: errorType, message: errorMessage }
+                        });
+                    }
+                    logger.error('[API] Chutes mid-stream error:', error);
+                    const { errorType, errorMessage } = parseError(error);
+                    res.write(`event: error\ndata: ${JSON.stringify({
+                        type: 'error',
+                        error: { type: errorType, message: errorMessage }
+                    })}\n\n`);
+                    res.end();
+                }
+            } else {
+                const response = await chutesSendMessage(request, chutesApiKey, chutesBaseUrl);
+                res.json(response);
+            }
+            return;
+        }
+
+        // Cloud Code provider (default)
+        // Ensure account manager is initialized
+        await ensureInitialized();
+
+        // Validate model ID before processing
+        const { account: validationAccount } = accountManager.selectAccount();
+        if (validationAccount) {
+            const token = await accountManager.getTokenForAccount(validationAccount);
+            const projectId = validationAccount.subscription?.projectId || null;
+            const valid = await isValidModel(modelId, token, projectId);
+
+            if (!valid) {
+                throw new Error(`invalid_request_error: Invalid model: ${modelId}. Use /v1/models to see available models.`);
+            }
+        }
+
+        // Optimistic Retry: If ALL accounts are rate-limited for this model, reset them to force a fresh check.
+        // If we have some available accounts, we try them first.
+        if (accountManager.isAllRateLimited(modelId)) {
+            logger.warn(`[Server] All accounts rate-limited for ${modelId}. Resetting state for optimistic retry.`);
+            accountManager.resetAllRateLimits();
         }
 
         if (stream) {

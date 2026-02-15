@@ -316,6 +316,20 @@ export const DEFAULT_PRESETS = [
             CLAUDE_CODE_SUBAGENT_MODEL: 'gemini-3-flash[1m]',
             ENABLE_EXPERIMENTAL_MCP_CLI: 'true'
         }
+    },
+    {
+        name: 'Chutes (Kimi K2)',
+        config: {
+            ANTHROPIC_AUTH_TOKEN: 'test',
+            ANTHROPIC_BASE_URL: 'http://localhost:8080',
+            ANTHROPIC_MODEL: 'moonshotai/Kimi-K2-Instruct',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'moonshotai/Kimi-K2-Instruct',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'moonshotai/Kimi-K2-Instruct',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'moonshotai/Kimi-K2-Instruct',
+            CLAUDE_CODE_SUBAGENT_MODEL: 'moonshotai/Kimi-K2-Instruct',
+            ENABLE_EXPERIMENTAL_MCP_CLI: 'true',
+            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+        }
     }
 ];
 

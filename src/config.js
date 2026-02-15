@@ -35,6 +35,11 @@ const DEFAULT_CONFIG = {
     debug: false,
     devMode: false,
     logLevel: 'info',
+    provider: 'cloudcode', // 'cloudcode' or 'chutes'
+    chutes: {
+        apiKey: '',                            // Chutes API key (or set CHUTES_API_KEY env var)
+        baseUrl: 'https://llm.chutes.ai'       // Chutes API base URL (or set CHUTES_BASE_URL env var)
+    },
     maxRetries: 5,
     retryBaseMs: 1000,
     retryMaxMs: 30000,
@@ -127,6 +132,11 @@ function loadConfig() {
         if (process.env.DEBUG === 'true') config.debug = true;
         if (process.env.DEV_MODE === 'true') config.devMode = true;
 
+        // Chutes provider overrides
+        if (process.env.PROVIDER) config.provider = process.env.PROVIDER;
+        if (process.env.CHUTES_API_KEY) config.chutes.apiKey = process.env.CHUTES_API_KEY;
+        if (process.env.CHUTES_BASE_URL) config.chutes.baseUrl = process.env.CHUTES_BASE_URL;
+
         // Backward compat: debug implies devMode
         if (config.debug && !config.devMode) config.devMode = true;
 
@@ -145,6 +155,7 @@ export function getPublicConfig() {
     // Redact sensitive values
     if (publicConfig.webuiPassword) publicConfig.webuiPassword = '********';
     if (publicConfig.apiKey) publicConfig.apiKey = '********';
+    if (publicConfig.chutes?.apiKey) publicConfig.chutes.apiKey = '********';
 
     return publicConfig;
 }
