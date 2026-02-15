@@ -4,6 +4,8 @@
  * for use with Chutes.ai (OpenAI-compatible API)
  */
 
+import crypto from 'crypto';
+
 import { logger } from '../utils/logger.js';
 
 /**
@@ -128,7 +130,7 @@ export function convertAnthropicToOpenAI(anthropicRequest) {
                     .join('\n');
 
                 const toolCalls = toolUseBlocks.map(block => ({
-                    id: block.id || `call_${Math.random().toString(36).slice(2)}`,
+                    id: block.id || `call_${crypto.randomBytes(12).toString('hex')}`,
                     type: 'function',
                     function: {
                         name: block.name,
